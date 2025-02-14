@@ -4,6 +4,8 @@ from langchain_openai import ChatOpenAI # type: ignore
 from langchain_core.prompts import ChatPromptTemplate # type: ignore
 from langchain_core.output_parsers import StrOutputParser # type: ignore
 from channels.generic.websocket import AsyncWebsocketConsumer # type: ignore
+from channels.db import database_sync_to_async # type:ignore
+from asgiref.sync import sync_to_async
 from langchain.memory import ConversationBufferMemory # type:ignore
 from channels.layers import get_channel_layer # type:ignore
 from dotenv import load_dotenv # type:ignore
@@ -22,18 +24,31 @@ llm = ChatOpenAI(model="gpt-4")
 output_parser = StrOutputParser()
 memory = ConversationBufferMemory(memory_key="history")
 
+
 class ChatConsumer(AsyncWebsocketConsumer):
     """Chat Consumer for handling WebSocket connections"""
-    
+
     async def connect(self):
         """Handle new WebSocket connection"""
-        self.room_name = "chat"
-        self.room_group_name = "chat"
+        # Get the room name from the URL (allow dynamic room names)
+        self.room_name = self.scope['url_route']['kwargs']['room_name']
+        self.room_group_name = f"chat_{self.room_name}"
+
+        # Join room group
+        await self.channel_layer.group_add(
+            self.room_group_name,
+            self.channel_name
+        )
+
         await self.accept()
 
     async def disconnect(self, close_code):
         """Handle WebSocket disconnection"""
-        pass
+        # Leave room group
+        await self.channel_layer.group_discard(
+            self.room_group_name,
+            self.channel_name
+        )
 
     async def receive(self, text_data):
         """Handle messages from the WebSocket"""
@@ -47,12 +62,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
             await self.close()
             return
 
-       
+        # Save context if necessary
         memory.save_context({"input": query}, {"output": ""})  
 
         conversation_context = memory.load_memory_variables({})
         print(f"Conversation context from memory: {conversation_context}")
-
 
         prompt_with_context = ChatPromptTemplate.from_messages([
             ("system", "You are a helpful assistant. Please respond to the user's queries."),
@@ -65,24 +79,27 @@ class ChatConsumer(AsyncWebsocketConsumer):
         
         memory.save_context({"input": query}, {"output": response})
 
-        await self.send(text_data=json.dumps({
-            "message": response
-        }))
+        # Broadcast the response to the room
+        await self.channel_layer.group_send(
+            self.room_group_name,
+            {
+                'type': 'chat_message',
+                'query':query,
+                'message': response
+            }
+        )
 
     async def chat_message(self, event):
         """Handles the messages received from the channel layer"""
         message = event['message']
-        print(f"Received message from channel layer: {message}")
+        query=event['query']
+        print(f"Received message from channel layer: {query,message}")
 
+        # Send message to WebSocket
         await self.send(text_data=json.dumps({
+            "query":query,
             "message": message
         }))
-
-
-
-
-
-
 
 
 
